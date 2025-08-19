@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snow Effect with Pose Detection</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #videoElement {
+            display: none;
+        }
+        
+        #outputCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1);
+        }
+        
+        #snowCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            transform: scaleX(-1);
+        }
+        
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 100;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            color: white;
+        }
+        
+        #controls label {
+            display: block;
+            margin-bottom: 10px;
+        }
+        
+        #controls input[type="range"] {
+            width: 150px;
+            margin-left: 10px;
+        }
+        
+        #controls input[type="checkbox"] {
+            margin-left: 10px;
+        }
+        
+        #status {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #0f0;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 5px 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <video id="videoElement"></video>
+        <canvas id="outputCanvas"></canvas>
+        <canvas id="snowCanvas"></canvas>
+        
+        <div id="controls">
+            <h3 style="margin-top: 0;">Snow Controls</h3>
+            <label>
+                Camera:
+                <select id="cameraSelect">
+                    <option value="">Loading cameras...</option>
+                </select>
+            </label>
+            <label>
+                Snow Intensity: <span id="intensityValue">100</span>
+                <input type="range" id="snowIntensity" min="50" max="500" value="100">
+            </label>
+            <label>
+                Wind: <span id="windValue">0</span>
+                <input type="range" id="windSpeed" min="-5" max="5" value="0" step="0.5">
+            </label>
+            <label>
+                Snow Size: <span id="sizeValue">3</span>
+                <input type="range" id="snowSize" min="1" max="5" value="3" step="0.5">
+            </label>
+            <label>
+                Show Skeleton:
+                <input type="checkbox" id="showSkeleton" checked>
+            </label>
+            <label>
+                Show Video:
+                <input type="checkbox" id="showVideo" checked>
+            </label>
+            <label>
+                Body Interaction:
+                <input type="checkbox" id="bodyInteraction" checked>
+            </label>
+            <label>
+                Background Color:
+                <input type="color" id="bgColor" value="#000000">
+            </label>
+        </div>
+        
+        <div id="status">Initializing...</div>
+    </div>
+
+    <script>
+        // Snow particle class
+        class SnowParticle {
+            constructor(canvas) {
+                this.canvas = canvas;
+                this.reset();
+                this.y = Math.random() * canvas.height;
+            }
+            
+            reset() {
+                this.x = Math.random() * this.canvas.width;
+                this.y = -10;
+                this.size = Math.random() * snowSize + 1;
+                this.speed = Math.random() * 2 + 1;
+                this.opacity = Math.random() * 0.8 + 0.2;
+                this.swing = Math.random() * 2 - 1;
+                this.swingSpeed = Math.random() * 0.05 + 0.02;
+                this.angle = 0;
+            }
+            
+            update(bodyParts, interactionEnabled) {
+                // Apply gravity and wind
+                this.y += this.speed;
+                this.angle += this.swingSpeed;
+                this.x += Math.sin(this.angle) * this.swing + windSpeed;
+                
+                // Body interaction
+                if (interactionEnabled && bodyParts) {
+                    for (let part of bodyParts) {
+                        if (part.visibility > 0.5) {
+                            const dx = this.x - part.x;
+                            const dy = this.y - part.y;
+                            const distance = Math.sqrt(dx * dx + dy * dy);
+                            
+                            // Collision detection with body parts
+                            if (distance < 50) {
+                                // Deflect snow around body
+                                const angle = Math.atan2(dy, dx);
+                                const force = (50 - distance) / 50;
+                                this.x += Math.cos(angle) * force * 5;
+                                this.y += Math.sin(angle) * force * 2;
+                                this.speed *= 0.95;
+                            }
+                        }
+                    }
+                }
+                
+                // Reset if out of bounds
+                if (this.y > this.canvas.height + 10 || 
+                    this.x < -50 || 
+                    this.x > this.canvas.width + 50) {
+                    this.reset();
+                }
+            }
+            
+            draw(ctx) {
+                ctx.save();
+                ctx.globalAlpha = this.opacity;
+                ctx.fillStyle = '#ffffff';
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+        
+        // Global variables
+        const videoElement = document.getElementById('videoElement');
+        const outputCanvas = document.getElementById('outputCanvas');
+        const snowCanvas = document.getElementById('snowCanvas');
+        const outputCtx = outputCanvas.getContext('2d');
+        const snowCtx = snowCanvas.getContext('2d');
+        const status = document.getElementById('status');
+        
+        let snowParticles = [];
+        let snowIntensity = 100;
+        let windSpeed = 0;
+        let snowSize = 3;
+        let showSkeleton = true;
+        let showVideo = true;
+        let bodyInteraction = true;
+        let bgColor = '#000000';
+        let currentBodyParts = null;
+        let camera = null;
+        let currentDeviceId = null;
+        
+        // Get available cameras
+        async function getCameras() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                
+                const cameraSelect = document.getElementById('cameraSelect');
+                cameraSelect.innerHTML = '';
+                
+                videoDevices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Camera ${index + 1}`;
+                    cameraSelect.appendChild(option);
+                });
+                
+                // Select first camera by default
+                if (videoDevices.length > 0) {
+                    currentDeviceId = videoDevices[0].deviceId;
+                    cameraSelect.value = currentDeviceId;
+                }
+                
+                return videoDevices;
+            } catch (err) {
+                console.error('Error getting cameras:', err);
+                status.textContent = 'Error accessing cameras';
+                return [];
+            }
+        }
+        
+        // Camera selection handler
+        document.getElementById('cameraSelect').addEventListener('change', async (e) => {
+            currentDeviceId = e.target.value;
+            if (camera) {
+                await restartCamera();
+            }
+        });
+        
+        // Restart camera with new device
+        async function restartCamera() {
+            try {
+                // Stop current camera
+                if (camera) {
+                    camera.stop();
+                    camera = null;
+                }
+                
+                // Small delay to ensure cleanup
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+                // Start with new device
+                await startCamera();
+            } catch (err) {
+                console.error('Error restarting camera:', err);
+                status.textContent = 'Error switching camera';
+            }
+        }
+        
+        // Start camera function
+        async function startCamera() {
+            try {
+                const constraints = {
+                    video: {
+                        deviceId: currentDeviceId ? { exact: currentDeviceId } : undefined,
+                        width: 1280,
+                        height: 720
+                    }
+                };
+                
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await pose.send({ image: videoElement });
+                    },
+                    width: 1280,
+                    height: 720,
+                    facingMode: currentDeviceId ? undefined : "user"
+                });
+                
+                // Override camera's default constraints if we have a specific device
+                if (currentDeviceId) {
+                    camera._stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    videoElement.srcObject = camera._stream;
+                }
+                
+                await camera.start();
+                status.textContent = 'Camera started - waiting for pose detection...';
+                
+                if (snowParticles.length === 0) {
+                    initSnowParticles();
+                    animateSnow();
+                }
+            } catch (err) {
+                console.error('Camera start error:', err);
+                status.textContent = 'Error: ' + err.message;
+            }
+        }
+        
+        // Control handlers
+        document.getElementById('snowIntensity').addEventListener('input', (e) => {
+            snowIntensity = parseInt(e.target.value);
+            document.getElementById('intensityValue').textContent = snowIntensity;
+            initSnowParticles();
+        });
+        
+        document.getElementById('windSpeed').addEventListener('input', (e) => {
+            windSpeed = parseFloat(e.target.value);
+            document.getElementById('windValue').textContent = windSpeed;
+        });
+        
+        document.getElementById('snowSize').addEventListener('input', (e) => {
+            snowSize = parseFloat(e.target.value);
+            document.getElementById('sizeValue').textContent = snowSize;
+        });
+        
+        document.getElementById('showSkeleton').addEventListener('change', (e) => {
+            showSkeleton = e.target.checked;
+        });
+        
+        document.getElementById('showVideo').addEventListener('change', (e) => {
+            showVideo = e.target.checked;
+        });
+        
+        document.getElementById('bodyInteraction').addEventListener('change', (e) => {
+            bodyInteraction = e.target.checked;
+        });
+        
+        document.getElementById('bgColor').addEventListener('input', (e) => {
+            bgColor = e.target.value;
+        });
+        
+        // Initialize snow particles
+        function initSnowParticles() {
+            snowParticles = [];
+            for (let i = 0; i < snowIntensity; i++) {
+                snowParticles.push(new SnowParticle(snowCanvas));
+            }
+        }
+        
+        // Setup MediaPipe Pose
+        const pose = new Pose({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${file}`;
+            }
+        });
+        
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        
+        pose.onResults((results) => {
+            // Resize canvases to match video
+            if (outputCanvas.width !== videoElement.videoWidth) {
+                outputCanvas.width = videoElement.videoWidth;
+                outputCanvas.height = videoElement.videoHeight;
+                snowCanvas.width = videoElement.videoWidth;
+                snowCanvas.height = videoElement.videoHeight;
+                initSnowParticles();
+            }
+            
+            // Clear output canvas
+            outputCtx.fillStyle = bgColor;
+            outputCtx.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
+            
+            // Draw video if enabled
+            if (showVideo) {
+                outputCtx.globalAlpha = 1;
+                outputCtx.drawImage(results.image, 0, 0, outputCanvas.width, outputCanvas.height);
+            }
+            
+            // Store body parts for snow interaction
+            if (results.poseLandmarks) {
+                currentBodyParts = results.poseLandmarks.map(landmark => ({
+                    x: landmark.x * outputCanvas.width,
+                    y: landmark.y * outputCanvas.height,
+                    z: landmark.z,
+                    visibility: landmark.visibility
+                }));
+                
+                // Draw skeleton if enabled
+                if (showSkeleton) {
+                    drawSkeleton(results.poseLandmarks);
+                }
+            }
+            
+            status.textContent = `Pose Detection: ${results.poseLandmarks ? 'Active' : 'No person detected'}`;
+        });
+        
+        // Draw skeleton
+        function drawSkeleton(landmarks) {
+            const connections = [
+                [0, 1], [1, 2], [2, 3], [3, 7], [0, 4], [4, 5], [5, 6], [6, 8],
+                [9, 10], [11, 12], [11, 13], [13, 15], [15, 17], [15, 19], [15, 21],
+                [17, 19], [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], [18, 20],
+                [11, 23], [12, 24], [23, 24], [23, 25], [24, 26], [25, 27], [26, 28],
+                [27, 29], [28, 30], [29, 31], [30, 32], [27, 31], [28, 32]
+            ];
+            
+            outputCtx.strokeStyle = '#00ff00';
+            outputCtx.lineWidth = 2;
+            
+            connections.forEach(([start, end]) => {
+                const startPoint = landmarks[start];
+                const endPoint = landmarks[end];
+                
+                if (startPoint.visibility > 0.5 && endPoint.visibility > 0.5) {
+                    outputCtx.beginPath();
+                    outputCtx.moveTo(startPoint.x * outputCanvas.width, startPoint.y * outputCanvas.height);
+                    outputCtx.lineTo(endPoint.x * outputCanvas.width, endPoint.y * outputCanvas.height);
+                    outputCtx.stroke();
+                }
+            });
+            
+            // Draw joints
+            outputCtx.fillStyle = '#ff0000';
+            landmarks.forEach(landmark => {
+                if (landmark.visibility > 0.5) {
+                    outputCtx.beginPath();
+                    outputCtx.arc(landmark.x * outputCanvas.width, landmark.y * outputCanvas.height, 5, 0, Math.PI * 2);
+                    outputCtx.fill();
+                }
+            });
+        }
+        
+        // Animation loop for snow
+        function animateSnow() {
+            snowCtx.clearRect(0, 0, snowCanvas.width, snowCanvas.height);
+            
+            snowParticles.forEach(particle => {
+                particle.update(currentBodyParts, bodyInteraction);
+                particle.draw(snowCtx);
+            });
+            
+            requestAnimationFrame(animateSnow);
+        }
+        
+        // Initialize application
+        async function init() {
+            try {
+                // Request camera permissions first
+                await navigator.mediaDevices.getUserMedia({ video: true });
+                
+                // Get available cameras
+                await getCameras();
+                
+                // Start with selected camera
+                await startCamera();
+            } catch (err) {
+                console.error('Initialization error:', err);
+                status.textContent = 'Error: Please allow camera access and refresh the page';
+            }
+        }
+        
+        // Start the application
+        init();
+    </script>
+</body>
+</html>
